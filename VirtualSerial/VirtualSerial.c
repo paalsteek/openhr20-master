@@ -37,24 +37,38 @@
 #include "VirtualSerial.h"
 #include "serial.h"
 
-//uint32_t Boot_Key ATTR_NO_INIT;
+#define HAS_BOOTLOADER (defined(FUSE_BOOTSZ0) && defined(FUSE_BOOTSZ1))
 
-#define MAGIC_BOOT_KEY 0xDEADBEEF
-#define FLASH_SIZE_BYTES 0x3FFF
-#define BOOTLOADER_SEC_SIZE_BYTES 0x07FF
-//#define BOOTLOADER_START_ADDRESS  (FLASH_SIZE_BYTES - BOOTLOADER_SEC_SIZE_BYTES)
-#define BOOTLOADER_START_ADDRESS 0x3800
+#if HAS_BOOTLOADER
+/* Calculate the size of the bootloader section in words based on
+ * BOOTSZ[1..0]
+ * See Table 23-11 of the ATmega32u2 datasheet for reference
+ */
+static inline uint16_t bootloader_size(void)
+{
+	uint8_t hfuse = boot_lock_fuse_bits_get(GET_HIGH_FUSE_BITS);
+	uint8_t bootsz = ((hfuse & FUSE_BOOTSZ0) == 0) | ((hfuse & FUSE_BOOTSZ1) == 0) << 1;
+	return 256 << (3-bootsz);
+}
 
-//void Bootloader_Jump_Check(void) ATTR_INIT_SECTION(3);
-//#void Bootloader_Jump_Check(void)
-//{
-	// If the reset source was the watchdog and the key is correct, clear it and jump to the bootloader
-//	if ((MCUSR & (1<<WDRF)) && (Boot_Key == MAGIC_BOOT_KEY))
-//	{
-//		Boot_Key = 0;
-//		((void (*)(void))BOOTLOADER_START_ADDRESS)();
-//	}
-//}
+/* Calculate the bootloader address. The bootloader is located at the end of the
+ * flash. So we have to substract the bootloader size from the flash size
+ */
+static inline uint16_t bootloader_address(void)
+{
+	return ((FLASHEND >> 1) - bootloader_size()) + 1;
+}
+
+/* Jumps to the beginning of bootloader. Address is computed in runtime */
+static inline void run_bootloader(void)
+{
+	USB_Disable();
+	cli();
+
+	uint16_t bladdr = bootloader_address();
+	((void (*)(void))bladdr)();
+}
+#endif
 
 /** LUFA CDC Class driver interface configuration and state information. This structure is
  *  passed to all CDC Class driver functions, so that multiple instances of the same class
@@ -91,7 +105,7 @@ USB_ClassInfo_CDC_Device_t VirtualSerial_CDC_Interface =
  */
 static FILE USBSerialStream;
 
-void Menu_Task()
+void Menu_Task(void)
 {
 	char buf[10];
 
@@ -101,38 +115,78 @@ void Menu_Task()
 		switch ( buf[0] )
 		{
 			case 'b':
-				cli();
-				// Disable USB
-				USB_Disable();
-				// Wait for 2 seconds so the host can detach the usb device
-				for ( uint8_t i = 0; i < 256; i++ )
-					_delay_ms(16);
-				__asm("jmp 0x7000");
+#if (defined(FUSE_BOOTSZ0) && defined(FUSE_BOOTSZ1))
+				run_bootloader();
+#else
+				SerialPutString("Unknown chip. Don't know where to find the bootloader." NEWLINESTR);
+#endif
 				break;
-			case 'd':
-			case 'D':
-			case 'i':
-			case 'I':
-			case 'p':
-			case 'P':
 			case 'S':
-			case 't':
-			case 'T':
-				SerialPutString("This funktion is not implemented yet." NEWLINESTR );
+				SerialPutString("Bootloader address: ");
+#if (defined(FUSE_BOOTSZ0) && defined(FUSE_BOOTSZ1))
+				{
+					uint8_t n = 9;
+					char buf[n];
+					uint8_t m = snprintf(buf, n, "0x%4x" NEWLINESTR, bootloader_address());
+					if (m < 0)
+						SerialPutString("Format error!" NEWLINESTR);
+					else if (m > n)
+						SerialPutString("Output error!" NEWLINESTR);
+					else
+						SerialPutString(buf);
+				}
+#else
+				SerialPutString("unknown" NEWLINESTR);
+#endif
+				cli();
+				char lfuse = boot_lock_fuse_bits_get(GET_LOW_FUSE_BITS);
+				char hfuse = boot_lock_fuse_bits_get(GET_HIGH_FUSE_BITS);
+				char efuse = boot_lock_fuse_bits_get(GET_EXTENDED_FUSE_BITS);
+				char lock = boot_lock_fuse_bits_get(GET_LOCK_BITS);
+				sei();
+				{
+					uint8_t n = 55;
+					char buf[n];
+					uint8_t m = snprintf(buf, n, "Fuses: lfuse:0x%2x, hfuse:0x%2x, efuse:0x%2x, lock:0x%2x" NEWLINESTR, lfuse, hfuse, efuse, lock);
+					if (m < 0)
+						SerialPutString("Format error!" NEWLINESTR);
+					else if (m > n)
+						SerialPutString("Output error!" NEWLINESTR);
+					else
+						SerialPutString(buf);
+				}
+
+				{
+					uint8_t n = 19;
+					char buf[n];
+					uint8_t m = snprintf(buf, n, "FLASHEND: 0x%4x" NEWLINESTR, FLASHEND);
+					if (m < 0)
+						SerialPutString("Format error!" NEWLINESTR);
+					else if (m > n)
+						SerialPutString("Output error!" NEWLINESTR);
+					else
+						SerialPutString(buf);
+				}
+
+				{
+					uint8_t n = 17;
+					char buf[n];
+					uint8_t m = snprintf(buf, n, "blsize: 0x%4x" NEWLINESTR, bootloader_size());
+					if (m < 0)
+						SerialPutString("Format error!" NEWLINESTR);
+					else if (m > n)
+						SerialPutString("Output error!" NEWLINESTR);
+					else
+						SerialPutString(buf);
+				}
+
 				break;
 			case 'h':
 			default:
-				SerialPutString("C8H10N4O2 menu" NEWLINESTR );
+				SerialPutString("OpenHR2 master menu" NEWLINESTR );
 				SerialPutString(" h: print this message" NEWLINESTR);
 				SerialPutString(" b: enter Bootloader mode" NEWLINESTR);
-				SerialPutString(" S: print current settings" NEWLINESTR );
-				SerialPutString("-----" NEWLINESTR );
-				SerialPutString(" p/P: increase/decrease p gain" NEWLINESTR );
-				SerialPutString(" i/I: increase/decrease i gain" NEWLINESTR );
-				SerialPutString(" d/D: increase/decrease d gain" NEWLINESTR );
-				SerialPutString(" t/T: increase/decrease setpoint" NEWLINESTR );
-				SerialPutString(" r: reset PID configuration to default values" NEWLINESTR );
-				SerialPutString(" s: save PID configuration to EEPROM" NEWLINESTR );
+				SerialPutString(" S: print current settings" NEWLINESTR);
 				break;
 		}
 	}
